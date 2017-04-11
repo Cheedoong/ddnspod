@@ -18,9 +18,9 @@ case $(uname) in
 	        extip=$(wget --quiet --no-check-certificate --output-document=- "http://members.3322.org/dyndns/getip")
         fi
         if [ "x${extip}" = "x" ]; then
-	        extip=$(ip -o -4 addr list | grep -Ev '\s(docker|lo)' | awk '{print $4}' | cut -d/ -f1 | grep -Ev '(^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$)|(^10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$)|(^172\.1[6-9]{1}[0-9]{0,1}\.[0-9]{1,3}\.[0-9]{1,3}$)|(^172\.2[0-9]{1}[0-9]{0,1}\.[0-9]{1,3}\.[0-9]{1,3}$)|(^172\.3[0-1]{1}[0-9]{0,1}\.[0-9]{1,3}\.[0-9]{1,3}$)|(^192\.168\.[0-9]{1,3}\.[0-9]{1,3}$)')
+        	extip=$(ip -o -4 addr list | grep -Ev '\s(docker|lo)' | awk '{print $4}' | cut -d/ -f1 | grep -Ev '(^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$)|(^10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$)|(^172\.1[6-9]{1}[0-9]{0,1}\.[0-9]{1,3}\.[0-9]{1,3}$)|(^172\.2[0-9]{1}[0-9]{0,1}\.[0-9]{1,3}\.[0-9]{1,3}$)|(^172\.3[0-1]{1}[0-9]{0,1}\.[0-9]{1,3}\.[0-9]{1,3}$)|(^192\.168\.[0-9]{1,3}\.[0-9]{1,3}$)')
         fi
-		if [ "x${extip}" = "x" ]; then
+        if [ "x${extip}" = "x" ]; then
 	        extip=$(ip -o -4 addr list | grep -Ev '\s(docker|lo)' | awk '{print $4}' | cut -d/ -f1 )
         fi
         echo $extip
@@ -115,15 +115,37 @@ arPass=""
 
 # Get Domain IP
 # arg: domain
-arNslookup() {
-    #wget --quiet --output-document=- $inter$1
-    echo ""
+arDdnsInfo() {
+    local domainID recordID recordIP
+    # Get domain ID
+    domainID=$(arApiPost "Domain.Info" "domain=${1}")
+    domainID=$(echo $domainID | sed 's/.*{"id":"\([0-9]*\)".*/\1/')
+    
+    # Get Record ID
+    recordID=$(arApiPost "Record.List" "domain_id=${domainID}&sub_domain=${2}")
+    recordID=$(echo $recordID | sed 's/.*\[{"id":"\([0-9]*\)".*/\1/')
+    
+    # Last IP
+    recordIP=$(arApiPost "Record.Info" "domain_id=${domainID}&record_id=${recordID}")
+    recordIP=$(echo $recordIP | sed 's/.*,"value":"\([0-9\.]*\)".*/\1/')
+
+    # Output IP
+    case "$recordIP" in 
+      [1-9][0-9]*)
+        echo $recordIP
+        return 0
+        ;;
+      *)
+        echo "Get Record Info Failed!"
+        return 1
+        ;;
+    esac
 }
 
 # Get data
 # arg: type data
 arApiPost() {
-    local agent="AnripDdns/5.07(mail@anrip.com)"
+    local agent="PearDDNS/1.01(service@pear.hk)"
     local inter="https://dnsapi.cn/${1:?'Info.Version'}"
     if [ "x${arToken}" = "x" ]; then # undefine token
         local param="login_email=${arMail}&login_password=${arPass}&format=json&${2}"
@@ -136,7 +158,7 @@ arApiPost() {
 # Update
 # arg: main domain  sub domain
 arDdnsUpdate() {
-    local domainID recordID recordRS recordCD myIP
+    local domainID recordID recordRS recordCD recordIP myIP
     # Get domain ID
     domainID=$(arApiPost "Domain.Info" "domain=${1}")
     domainID=$(echo $domainID | sed 's/.*{"id":"\([0-9]*\)".*/\1/')
@@ -149,31 +171,48 @@ arDdnsUpdate() {
     myIP=$(arIpAddress)
     recordRS=$(arApiPost "Record.Ddns" "domain_id=${domainID}&record_id=${recordID}&sub_domain=${2}&record_type=A&value=${myIP}&record_line=默认")
     recordCD=$(echo $recordRS | sed 's/.*{"code":"\([0-9]*\)".*/\1/')
+    recordIP=$(echo $recordRS | sed 's/.*,"value":"\([0-9\.]*\)".*/\1/')
 
     # Output IP
-    if [ "$recordCD" = "1" ]; then
-        echo $recordRS | sed 's/.*,"value":"\([0-9\.]*\)".*/\1/'
+    if [ "$recordIP" = "$myIP" ]; then
+        if [ "$recordCD" = "1" ]; then
+            echo $recordIP
+            return 0
+        fi
+        # Echo error message
+        echo $recordRS | sed 's/.*,"message":"\([^"]*\)".*/\1/'
+        return 1
+    else
+        echo "Update Failed! Please check your network."
         return 1
     fi
-    # Echo error message
-    echo $recordRS | sed 's/.*,"message":"\([^"]*\)".*/\1/'
 }
 
 # DDNS Check
 # Arg: Main Sub
 arDdnsCheck() {
     local postRS
+    local lastIP
     local hostIP=$(arIpAddress)
-    local lastIP=$(arNslookup "${2}.${1}")
+    echo "Updating Domain: ${2}.${1}"
     echo "hostIP: ${hostIP}"
-    echo "lastIP: ${lastIP}"
-    if [ "$lastIP" != "$hostIP" ]; then
-        postRS=$(arDdnsUpdate $1 $2)
-        echo "postRS: ${postRS}"
-        if [ $? -ne 1 ]; then
-            return 0
+    lastIP=$(arDdnsInfo $1 $2)
+    if [ $? -eq 0 ]; then
+        echo "lastIP: ${lastIP}"
+        if [ "$lastIP" != "$hostIP" ]; then
+            postRS=$(arDdnsUpdate $1 $2)
+            if [ $? -eq 0 ]; then
+                echo "postRS: ${postRS}"
+                return 0
+            else
+                echo ${postRS}
+                return 1
+            fi
         fi
+        echo "Last IP is the same as current IP!"
+        return 1
     fi
+    echo ${lastIP}
     return 1
 }
 
